@@ -1,0 +1,8 @@
+{
+  "name": "GLUK Debate Club Portal",
+  "description": "Executive operations, debate session tracker, Google Meet live assistant, financials, member pool, and alumni network for Great Lakes University of Kisumu Debate Club.",
+  "requestFramePermissions": [
+    "microphone"
+  ],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
