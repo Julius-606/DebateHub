@@ -9,6 +9,7 @@ import {
   CalendarEvent,
   AlumniMentorshipNote,
 } from './types';
+import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { Header } from './components/common/Header';
 import { ExecutiveDashboard } from './components/executive/ExecutiveDashboard';
 import { MemberDashboard } from './components/member/MemberDashboard';
@@ -20,6 +21,7 @@ import { MotionVault } from './components/member/MotionVault';
 import { CalendarActivities } from './components/member/CalendarActivities';
 import { AnnouncementsFeed } from './components/member/AnnouncementsFeed';
 import { DrillsPractice } from './components/debate/DrillsPractice';
+import { NeonConnectionModal } from './components/common/NeonConnectionModal';
 import { GlukDebateLogo } from './components/common/GlukDebateLogo';
 import {
   QrCode,
@@ -30,21 +32,25 @@ import {
   Lock,
   Eye,
   ShieldCheck,
+  Database,
 } from 'lucide-react';
 
-export default function App() {
-  // State loaded from storage service
-  const [members, setMembers] = useState<Member[]>(() => storage.getMembers());
+function AppContent() {
+  const {
+    currentUser,
+    allMembers,
+    switchUserPersona,
+    updateMemberProfile,
+    isLoggedInWithGoogle,
+  } = useAuth();
+
+  // State loaded from storage service / API
   const [agendas, setAgendas] = useState<AgendaItem[]>(() => storage.getAgendas());
   const [transactions, setTransactions] = useState<FinancialTransaction[]>(() => storage.getTransactions());
   const [debates, setDebates] = useState<DebateSession[]>(() => storage.getDebates());
   const [announcements, setAnnouncements] = useState<Announcement[]>(() => storage.getAnnouncements());
   const [events, setEvents] = useState<CalendarEvent[]>(() => storage.getEvents());
   const [mentorshipNotes, setMentorshipNotes] = useState<AlumniMentorshipNote[]>(() => storage.getMentorshipNotes());
-
-  // Currently logged-in persona / user
-  const [currentUserId, setCurrentUserId] = useState<string>(() => storage.getCurrentUserId());
-  const currentUser = members.find((m) => m.id === currentUserId) || members[0];
 
   const isExecutiveUser = currentUser.role === 'executive';
 
@@ -55,6 +61,40 @@ export default function App() {
   const [currentTab, setCurrentTab] = useState<string>(() =>
     isExecutiveUser ? 'executive' : 'member-home'
   );
+
+  // Neon connection modal
+  const [showNeonModal, setShowNeonModal] = useState(false);
+
+  // Show member digital pass modal
+  const [showMemberPassModal, setShowMemberPassModal] = useState(false);
+
+  // Fetch initial data from server API if running fullstack
+  useEffect(() => {
+    fetch('/api/members')
+      .then((r) => r.json())
+      .catch((e) => console.log('Using local fallback for members:', e));
+
+    fetch('/api/transactions')
+      .then((r) => r.json())
+      .then((data) => {
+        if (Array.isArray(data) && data.length > 0) setTransactions(data);
+      })
+      .catch((e) => console.log('Using local fallback for txns:', e));
+
+    fetch('/api/debates')
+      .then((r) => r.json())
+      .then((data) => {
+        if (Array.isArray(data) && data.length > 0) setDebates(data);
+      })
+      .catch((e) => console.log('Using local fallback for debates:', e));
+
+    fetch('/api/announcements')
+      .then((r) => r.json())
+      .then((data) => {
+        if (Array.isArray(data) && data.length > 0) setAnnouncements(data);
+      })
+      .catch((e) => console.log('Using local fallback for announcements:', e));
+  }, []);
 
   // When user persona changes, ensure mode is aligned
   useEffect(() => {
@@ -69,19 +109,12 @@ export default function App() {
         setCurrentTab('executive');
       }
     }
-  }, [currentUserId, isExecutiveUser]);
+  }, [currentUser.id, isExecutiveUser]);
 
   // Active live debate session
   const liveSession = debates.find((d) => d.status === 'Live Now') || debates[0];
 
-  // Show member digital pass modal
-  const [showMemberPassModal, setShowMemberPassModal] = useState(false);
-
-  // Sync state to local storage when modified
-  useEffect(() => {
-    storage.saveMembers(members);
-  }, [members]);
-
+  // Sync state to local storage and try sync to Neon API
   useEffect(() => {
     storage.saveAgendas(agendas);
   }, [agendas]);
@@ -106,15 +139,6 @@ export default function App() {
     storage.saveMentorshipNotes(mentorshipNotes);
   }, [mentorshipNotes]);
 
-  useEffect(() => {
-    storage.saveCurrentUserId(currentUserId);
-  }, [currentUserId]);
-
-  // Handlers
-  const handleSelectUser = (user: Member) => {
-    setCurrentUserId(user.id);
-  };
-
   const handleToggleExecutiveMode = () => {
     if (!isExecutiveUser) return;
     const nextMode = !isExecutiveMode;
@@ -124,43 +148,59 @@ export default function App() {
 
   const handleAddTransaction = (txn: FinancialTransaction) => {
     setTransactions((prev) => [txn, ...prev]);
+    fetch('/api/transactions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(txn),
+    }).catch((e) => console.warn('Could not post txn to server:', e));
   };
 
   const handleVerifyMemberPayment = (memberId: string, mpesaRef: string) => {
-    setMembers((prev) =>
-      prev.map((m) =>
-        m.id === memberId
-          ? { ...m, membershipStatus: 'Paid' as const, mpesaRef }
-          : m
-      )
-    );
+    const targetMember = allMembers.find((m) => m.id === memberId);
+    if (!targetMember) return;
+
+    const updatedMember = {
+      ...targetMember,
+      membershipStatus: 'Paid' as const,
+      mpesaRef,
+    };
+
+    updateMemberProfile(updatedMember);
+
+    // Sync member update to server
+    fetch('/api/members', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(updatedMember),
+    }).catch((e) => console.warn('Could not post member update to server:', e));
 
     // Auto-record in treasury ledger
-    const targetMember = members.find((m) => m.id === memberId);
-    if (targetMember) {
-      const autoTxn: FinancialTransaction = {
-        id: `txn-dues-${Date.now()}`,
-        date: new Date().toISOString().split('T')[0],
-        type: 'Income',
-        category: 'Semester Dues',
-        amountKes: 500,
-        description: `Verified Semester Dues payment for ${targetMember.fullName} (${targetMember.studentId})`,
-        referenceCode: mpesaRef,
-        recordedBy: `${currentUser.fullName} (${currentUser.executivePosition || 'Executive'})`,
-        status: 'Verified',
-      };
-      setTransactions((prev) => [autoTxn, ...prev]);
-    }
+    const autoTxn: FinancialTransaction = {
+      id: `txn-dues-${Date.now()}`,
+      date: new Date().toISOString().split('T')[0],
+      type: 'Income',
+      category: 'Semester Dues',
+      amountKes: 500,
+      description: `Verified Semester Dues payment for ${targetMember.fullName} (${targetMember.studentId})`,
+      referenceCode: mpesaRef,
+      recordedBy: `${currentUser.fullName} (${currentUser.executivePosition || 'Executive'})`,
+      status: 'Verified',
+    };
+
+    handleAddTransaction(autoTxn);
   };
 
   const handleSubmitDuesMpesa = (mpesaCode: string) => {
-    setMembers((prev) =>
-      prev.map((m) =>
-        m.id === currentUser.id
-          ? { ...m, mpesaRef: mpesaCode }
-          : m
-      )
-    );
+    const updated = {
+      ...currentUser,
+      mpesaRef: mpesaCode,
+    };
+    updateMemberProfile(updated);
+    fetch('/api/members', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(updated),
+    }).catch((e) => console.warn('Could not post dues ref to server:', e));
   };
 
   const handleUpdateLiveSession = (updatedSession: DebateSession) => {
@@ -170,32 +210,24 @@ export default function App() {
   };
 
   const handleSaveSessionToArchive = (session: DebateSession) => {
-    // 1. Update session status
     setDebates((prev) =>
       prev.map((d) => (d.id === session.id ? session : d))
     );
 
-    // 2. Mark attendance for attendees
     if (session.attendeeIds && session.attendeeIds.length > 0) {
-      setMembers((prev) =>
-        prev.map((m) => {
-          if (session.attendeeIds.includes(m.id)) {
-            const nextAttended = m.debatesAttendedCount + 1;
-            const nextTotal = m.totalDebatesCount + 1;
-            const nextRate = Math.round((nextAttended / nextTotal) * 100);
-            return {
-              ...m,
-              debatesAttendedCount: nextAttended,
-              totalDebatesCount: nextTotal,
-              attendanceRate: nextRate,
-            };
-          }
-          return {
+      allMembers.forEach((m) => {
+        if (session.attendeeIds.includes(m.id)) {
+          const nextAttended = m.debatesAttendedCount + 1;
+          const nextTotal = m.totalDebatesCount + 1;
+          const nextRate = Math.round((nextAttended / nextTotal) * 100);
+          updateMemberProfile({
             ...m,
-            totalDebatesCount: m.totalDebatesCount + 1,
-          };
-        })
-      );
+            debatesAttendedCount: nextAttended,
+            totalDebatesCount: nextTotal,
+            attendanceRate: nextRate,
+          });
+        }
+      });
     }
 
     setCurrentTab('motion-vault');
@@ -225,16 +257,17 @@ export default function App() {
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans selection:bg-amber-500/20 selection:text-amber-200">
       
-      {/* Top Header conforming to Section 2 Top Bar Contract */}
+      {/* Top Header */}
       <Header
         currentTab={currentTab}
         onSelectTab={setCurrentTab}
         currentUser={currentUser}
-        allMembers={members}
-        onSelectUser={handleSelectUser}
+        allMembers={allMembers}
+        onSelectUser={switchUserPersona}
         isLiveDebateActive={debates.some((d) => d.status === 'Live Now')}
         isExecutiveMode={isExecutiveMode}
         onToggleExecutiveMode={isExecutiveUser ? handleToggleExecutiveMode : undefined}
+        onOpenNeonModal={() => setShowNeonModal(true)}
       />
 
       {/* Sub-bar showing contextual portal mode & quick shortcuts */}
@@ -283,6 +316,16 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-3 text-[11px] text-slate-500">
+            <button
+              onClick={() => setShowNeonModal(true)}
+              className="text-emerald-400 hover:text-emerald-300 font-medium flex items-center gap-1"
+            >
+              <Database className="w-3 h-3" />
+              <span>Neon PostgreSQL</span>
+            </button>
+
+            <span>·</span>
+
             <span>
               Signed in: <strong className="text-slate-300">{currentUser.fullName}</strong> ({currentUser.executivePosition || currentUser.role})
             </span>
@@ -321,7 +364,7 @@ export default function App() {
           </div>
         ) : (
           <>
-            {/* 1. MEMBER DASHBOARD (strictly personal attendance, dues, announcements, schedule) */}
+            {/* 1. MEMBER DASHBOARD */}
             {currentTab === 'member-home' && (
               <MemberDashboard
                 currentUser={currentUser}
@@ -335,10 +378,10 @@ export default function App() {
               />
             )}
 
-            {/* 2. EXECUTIVE DASHBOARD (club oversight, data intelligence, treasury balance, delegations) */}
+            {/* 2. EXECUTIVE DASHBOARD */}
             {currentTab === 'executive' && (
               <ExecutiveDashboard
-                members={members}
+                members={allMembers}
                 debates={debates}
                 transactions={transactions}
                 agendas={agendas}
@@ -352,7 +395,7 @@ export default function App() {
             {currentTab === 'finances' && (
               <FinancialLedger
                 transactions={transactions}
-                members={members}
+                members={allMembers}
                 onAddTransaction={handleAddTransaction}
                 onVerifyMemberPayment={handleVerifyMemberPayment}
               />
@@ -362,27 +405,27 @@ export default function App() {
             {currentTab === 'agendas' && (
               <MeetingAgendasLogistics
                 agendas={agendas}
-                members={members}
+                members={allMembers}
                 onUpdateAgendas={setAgendas}
               />
             )}
 
-            {/* 5. SHARED / MEMBER ALLOWED: LIVE DEBATE & MEET COMPANION */}
+            {/* 5. SHARED: LIVE DEBATE & MEET COMPANION */}
             {currentTab === 'live-debate' && (
               <LiveDebateSuite
                 session={liveSession}
-                allMembers={members}
+                allMembers={allMembers}
                 onUpdateSession={handleUpdateLiveSession}
                 onSaveSessionToArchive={handleSaveSessionToArchive}
               />
             )}
 
-            {/* 6. SHARED / MEMBER ALLOWED: MOTION VAULT & ARCHIVES */}
+            {/* 6. SHARED: MOTION VAULT & ARCHIVES */}
             {currentTab === 'motion-vault' && (
               <MotionVault debates={debates} />
             )}
 
-            {/* 7. SHARED / MEMBER ALLOWED: CALENDAR OF ACTIVITIES */}
+            {/* 7. SHARED: CALENDAR OF ACTIVITIES */}
             {currentTab === 'calendar' && (
               <CalendarActivities
                 events={events}
@@ -391,17 +434,17 @@ export default function App() {
               />
             )}
 
-            {/* 8. SHARED / MEMBER ALLOWED: MEMBERS POOL & ALUMNI NETWORK */}
+            {/* 8. SHARED: MEMBERS POOL & ALUMNI NETWORK */}
             {currentTab === 'members' && (
               <MemberDirectoryPool
-                members={members}
+                members={allMembers}
                 currentUser={currentUser}
                 mentorshipNotes={mentorshipNotes}
                 onAddMentorshipNote={(note) => setMentorshipNotes((prev) => [note, ...prev])}
               />
             )}
 
-            {/* 9. SHARED / MEMBER ALLOWED: ANNOUNCEMENTS */}
+            {/* 9. SHARED: ANNOUNCEMENTS */}
             {currentTab === 'announcements' && (
               <AnnouncementsFeed
                 announcements={announcements}
@@ -412,7 +455,7 @@ export default function App() {
               />
             )}
 
-            {/* 10. SHARED / MEMBER ALLOWED: SPEAKING DRILLS */}
+            {/* 10. SHARED: SPEAKING DRILLS */}
             {currentTab === 'drills' && (
               <DrillsPractice />
             )}
@@ -432,6 +475,13 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-4 text-slate-400">
+            <button
+              onClick={() => setShowNeonModal(true)}
+              className="text-emerald-400 hover:text-emerald-300 transition-colors"
+            >
+              Neon PostgreSQL Database
+            </button>
+            <span>·</span>
             {isExecutiveMode && (
               <>
                 <button
@@ -527,6 +577,20 @@ export default function App() {
         </div>
       )}
 
+      {/* Neon PostgreSQL Connection Modal */}
+      <NeonConnectionModal
+        isOpen={showNeonModal}
+        onClose={() => setShowNeonModal(false)}
+      />
+
     </div>
+  );
+}
+
+export default function App() {
+  return (
+    <AuthProvider>
+      <AppContent />
+    </AuthProvider>
   );
 }
