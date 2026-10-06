@@ -1,5 +1,4 @@
 import React, { useState, useEffect } from 'react';
-import { storage } from './services/storage';
 import {
   Member,
   DebateSession,
@@ -10,7 +9,9 @@ import {
   AlumniMentorshipNote,
 } from './types';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
+import { liveSync } from './services/liveSync';
 import { Header } from './components/common/Header';
+import { AuthModal } from './components/auth/AuthModal';
 import { ExecutiveDashboard } from './components/executive/ExecutiveDashboard';
 import { MemberDashboard } from './components/member/MemberDashboard';
 import { LiveDebateSuite } from './components/debate/LiveDebateSuite';
@@ -21,7 +22,6 @@ import { MotionVault } from './components/member/MotionVault';
 import { CalendarActivities } from './components/member/CalendarActivities';
 import { AnnouncementsFeed } from './components/member/AnnouncementsFeed';
 import { DrillsPractice } from './components/debate/DrillsPractice';
-import { NeonConnectionModal } from './components/common/NeonConnectionModal';
 import { GlukDebateLogo } from './components/common/GlukDebateLogo';
 import {
   QrCode,
@@ -33,111 +33,121 @@ import {
   Eye,
   ShieldCheck,
   Database,
+  LogIn,
+  Radio,
+  CheckCircle2,
 } from 'lucide-react';
 
 function AppContent() {
   const {
     currentUser,
     allMembers,
-    switchUserPersona,
-    updateMemberProfile,
-    isLoggedInWithGoogle,
+    isLoggedIn,
+    isFreshDatabase,
+    reinitializeDatabase,
+    refreshAllData,
   } = useAuth();
 
-  // State loaded from storage service / API
-  const [agendas, setAgendas] = useState<AgendaItem[]>(() => storage.getAgendas());
-  const [transactions, setTransactions] = useState<FinancialTransaction[]>(() => storage.getTransactions());
-  const [debates, setDebates] = useState<DebateSession[]>(() => storage.getDebates());
-  const [announcements, setAnnouncements] = useState<Announcement[]>(() => storage.getAnnouncements());
-  const [events, setEvents] = useState<CalendarEvent[]>(() => storage.getEvents());
-  const [mentorshipNotes, setMentorshipNotes] = useState<AlumniMentorshipNote[]>(() => storage.getMentorshipNotes());
+  // Core collections synced from server database.json
+  const [agendas, setAgendas] = useState<AgendaItem[]>([]);
+  const [transactions, setTransactions] = useState<FinancialTransaction[]>([]);
+  const [debates, setDebates] = useState<DebateSession[]>([]);
+  const [announcements, setAnnouncements] = useState<Announcement[]>([]);
+  const [events, setEvents] = useState<CalendarEvent[]>([]);
+  const [mentorshipNotes, setMentorshipNotes] = useState<AlumniMentorshipNote[]>([]);
 
-  const isExecutiveUser = currentUser.role === 'executive';
+  // Navigation
+  const isExecutiveUser = currentUser?.role === 'executive';
+  const [isExecutiveMode, setIsExecutiveMode] = useState<boolean>(true);
+  const [currentTab, setCurrentTab] = useState<string>('member-home');
 
-  // Executive mode toggle (only executive users can toggle this)
-  const [isExecutiveMode, setIsExecutiveMode] = useState<boolean>(() => isExecutiveUser);
-
-  // Active navigation tab
-  const [currentTab, setCurrentTab] = useState<string>(() =>
-    isExecutiveUser ? 'executive' : 'member-home'
-  );
-
-  // Neon connection modal
-  const [showNeonModal, setShowNeonModal] = useState(false);
-
-  // Show member digital pass modal
+  // Modals
+  const [showAuthModal, setShowAuthModal] = useState(false);
   const [showMemberPassModal, setShowMemberPassModal] = useState(false);
+  const [liveToast, setLiveToast] = useState<{ title: string; message: string } | null>(null);
 
-  // Fetch initial data from server API if running fullstack
+  // Sync mode based on logged-in user
   useEffect(() => {
-    fetch('/api/members')
-      .then((r) => r.json())
-      .catch((e) => console.log('Using local fallback for members:', e));
-
-    fetch('/api/transactions')
-      .then((r) => r.json())
-      .then((data) => {
-        if (Array.isArray(data) && data.length > 0) setTransactions(data);
-      })
-      .catch((e) => console.log('Using local fallback for txns:', e));
-
-    fetch('/api/debates')
-      .then((r) => r.json())
-      .then((data) => {
-        if (Array.isArray(data) && data.length > 0) setDebates(data);
-      })
-      .catch((e) => console.log('Using local fallback for debates:', e));
-
-    fetch('/api/announcements')
-      .then((r) => r.json())
-      .then((data) => {
-        if (Array.isArray(data) && data.length > 0) setAnnouncements(data);
-      })
-      .catch((e) => console.log('Using local fallback for announcements:', e));
-  }, []);
-
-  // When user persona changes, ensure mode is aligned
-  useEffect(() => {
-    if (!isExecutiveUser) {
-      setIsExecutiveMode(false);
-      if (currentTab === 'executive' || currentTab === 'finances' || currentTab === 'agendas') {
+    if (currentUser) {
+      if (currentUser.role === 'executive') {
+        setIsExecutiveMode(true);
+        setCurrentTab('executive');
+      } else {
+        setIsExecutiveMode(false);
         setCurrentTab('member-home');
       }
     } else {
-      setIsExecutiveMode(true);
-      if (currentTab === 'member-home') {
-        setCurrentTab('executive');
-      }
+      setIsExecutiveMode(false);
+      setCurrentTab('member-home');
     }
-  }, [currentUser.id, isExecutiveUser]);
+  }, [currentUser?.id, currentUser?.role]);
 
-  // Active live debate session
-  const liveSession = debates.find((d) => d.status === 'Live Now') || debates[0];
-
-  // Sync state to local storage and try sync to Neon API
+  // Open auth modal if database is fresh or user not logged in
   useEffect(() => {
-    storage.saveAgendas(agendas);
-  }, [agendas]);
+    if (isFreshDatabase || !isLoggedIn) {
+      setShowAuthModal(true);
+    }
+  }, [isFreshDatabase, isLoggedIn]);
+
+  // Fetch all live collections from server database.json
+  const fetchAllCollections = async () => {
+    try {
+      const [agRes, txRes, debRes, annRes, evRes] = await Promise.all([
+        fetch('/api/agendas').then((r) => (r.ok ? r.json() : [])),
+        fetch('/api/transactions').then((r) => (r.ok ? r.json() : [])),
+        fetch('/api/debates').then((r) => (r.ok ? r.json() : [])),
+        fetch('/api/announcements').then((r) => (r.ok ? r.json() : [])),
+        fetch('/api/events').then((r) => (r.ok ? r.json() : [])),
+      ]);
+
+      setAgendas(Array.isArray(agRes) ? agRes : []);
+      setTransactions(Array.isArray(txRes) ? txRes : []);
+      setDebates(Array.isArray(debRes) ? debRes : []);
+      setAnnouncements(Array.isArray(annRes) ? annRes : []);
+      setEvents(Array.isArray(evRes) ? evRes : []);
+    } catch (err) {
+      console.warn('Error fetching live data:', err);
+    }
+  };
 
   useEffect(() => {
-    storage.saveTransactions(transactions);
-  }, [transactions]);
+    fetchAllCollections();
+  }, []);
 
+  // Listen to live Server-Sent Events (SSE) across the entire system!
   useEffect(() => {
-    storage.saveDebates(debates);
-  }, [debates]);
+    const unsubscribe = liveSync.subscribe((event) => {
+      // Data flowing around the system!
+      if (event.type === 'AGENDA_UPDATED') {
+        fetch('/api/agendas').then((r) => r.json()).then(setAgendas);
+      }
+      if (event.type === 'TRANSACTION_CREATED' || event.type === 'DUES_VERIFIED') {
+        fetch('/api/transactions').then((r) => r.json()).then(setTransactions);
+      }
+      if (event.type === 'DEBATE_UPDATED') {
+        fetch('/api/debates').then((r) => r.json()).then(setDebates);
+      }
+      if (event.type === 'ANNOUNCEMENT_CREATED') {
+        fetch('/api/announcements').then((r) => r.json()).then(setAnnouncements);
+      }
+      if (event.type === 'EVENT_CREATED') {
+        fetch('/api/events').then((r) => r.json()).then(setEvents);
+      }
 
-  useEffect(() => {
-    storage.saveAnnouncements(announcements);
-  }, [announcements]);
+      // Show live toast banner when notifications arrive
+      if (event.type === 'NOTIFICATION_NEW') {
+        const notif = event.payload;
+        setLiveToast({ title: notif.title, message: notif.message });
+        setTimeout(() => setLiveToast(null), 5000);
+      }
 
-  useEffect(() => {
-    storage.saveEvents(events);
-  }, [events]);
+      if (event.type === 'SYSTEM_REINITIALIZED') {
+        fetchAllCollections();
+      }
+    });
 
-  useEffect(() => {
-    storage.saveMentorshipNotes(mentorshipNotes);
-  }, [mentorshipNotes]);
+    return () => unsubscribe();
+  }, []);
 
   const handleToggleExecutiveMode = () => {
     if (!isExecutiveUser) return;
@@ -146,131 +156,154 @@ function AppContent() {
     setCurrentTab(nextMode ? 'executive' : 'member-home');
   };
 
-  const handleAddTransaction = (txn: FinancialTransaction) => {
-    setTransactions((prev) => [txn, ...prev]);
-    fetch('/api/transactions', {
+  // Operations that write to database.json and broadcast live
+  const handleAddTransaction = async (txn: FinancialTransaction) => {
+    await fetch('/api/transactions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(txn),
-    }).catch((e) => console.warn('Could not post txn to server:', e));
+    });
+    setTransactions((prev) => [txn, ...prev]);
   };
 
-  const handleVerifyMemberPayment = (memberId: string, mpesaRef: string) => {
-    const targetMember = allMembers.find((m) => m.id === memberId);
-    if (!targetMember) return;
-
-    const updatedMember = {
-      ...targetMember,
-      membershipStatus: 'Paid' as const,
-      mpesaRef,
-    };
-
-    updateMemberProfile(updatedMember);
-
-    // Sync member update to server
-    fetch('/api/members', {
+  const handleVerifyMemberPayment = async (memberId: string, mpesaRef: string) => {
+    await fetch('/api/members/verify-dues', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(updatedMember),
-    }).catch((e) => console.warn('Could not post member update to server:', e));
-
-    // Auto-record in treasury ledger
-    const autoTxn: FinancialTransaction = {
-      id: `txn-dues-${Date.now()}`,
-      date: new Date().toISOString().split('T')[0],
-      type: 'Income',
-      category: 'Semester Dues',
-      amountKes: 500,
-      description: `Verified Semester Dues payment for ${targetMember.fullName} (${targetMember.studentId})`,
-      referenceCode: mpesaRef,
-      recordedBy: `${currentUser.fullName} (${currentUser.executivePosition || 'Executive'})`,
-      status: 'Verified',
-    };
-
-    handleAddTransaction(autoTxn);
+      body: JSON.stringify({
+        memberId,
+        mpesaRef,
+        verifiedBy: currentUser?.fullName || 'Finance Secretary',
+      }),
+    });
+    refreshAllData();
   };
 
-  const handleSubmitDuesMpesa = (mpesaCode: string) => {
-    const updated = {
-      ...currentUser,
-      mpesaRef: mpesaCode,
-    };
-    updateMemberProfile(updated);
-    fetch('/api/members', {
+  const handleSubmitDuesMpesa = async (mpesaCode: string) => {
+    if (!currentUser) return;
+    await fetch('/api/members/submit-mpesa', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(updated),
-    }).catch((e) => console.warn('Could not post dues ref to server:', e));
+      body: JSON.stringify({
+        memberId: currentUser.id,
+        mpesaCode,
+      }),
+    });
+    refreshAllData();
   };
 
-  const handleUpdateLiveSession = (updatedSession: DebateSession) => {
+  const handleUpdateAgendas = async (updatedAgendas: AgendaItem[]) => {
+    const currentAgenda = updatedAgendas[0];
+    if (currentAgenda) {
+      await fetch('/api/agendas', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(currentAgenda),
+      });
+    }
+    setAgendas(updatedAgendas);
+  };
+
+  const handleUpdateLiveSession = async (updatedSession: DebateSession) => {
+    await fetch('/api/debates', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(updatedSession),
+    });
     setDebates((prev) =>
       prev.map((d) => (d.id === updatedSession.id ? updatedSession : d))
     );
   };
 
-  const handleSaveSessionToArchive = (session: DebateSession) => {
+  const handleSaveSessionToArchive = async (session: DebateSession) => {
+    await fetch('/api/debates', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(session),
+    });
     setDebates((prev) =>
       prev.map((d) => (d.id === session.id ? session : d))
     );
-
-    if (session.attendeeIds && session.attendeeIds.length > 0) {
-      allMembers.forEach((m) => {
-        if (session.attendeeIds.includes(m.id)) {
-          const nextAttended = m.debatesAttendedCount + 1;
-          const nextTotal = m.totalDebatesCount + 1;
-          const nextRate = Math.round((nextAttended / nextTotal) * 100);
-          updateMemberProfile({
-            ...m,
-            debatesAttendedCount: nextAttended,
-            totalDebatesCount: nextTotal,
-            attendanceRate: nextRate,
-          });
-        }
-      });
-    }
-
     setCurrentTab('motion-vault');
   };
 
-  const handleExportFullHandover = () => {
-    const jsonStr = storage.exportDatabaseJson();
+  const handleAddAnnouncement = async (ann: Announcement) => {
+    await fetch('/api/announcements', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(ann),
+    });
+    setAnnouncements((prev) => [ann, ...prev]);
+  };
+
+  const handleAddEvent = async (ev: CalendarEvent) => {
+    await fetch('/api/events', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(ev),
+    });
+    setEvents((prev) => [ev, ...prev]);
+  };
+
+  const handleExportDatabase = () => {
+    const fullDb = {
+      users: allMembers,
+      agendas,
+      transactions,
+      debates,
+      announcements,
+      events,
+      exportedAt: new Date().toISOString(),
+      institution: 'Great Lakes University of Kisumu Debate Club',
+    };
+    const jsonStr = JSON.stringify(fullDb, null, 2);
     const blob = new Blob([jsonStr], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `GLUK_Debate_Club_Executive_Handover_${new Date().toISOString().split('T')[0]}.json`;
+    a.download = `GLUK_Debate_Database_Export_${new Date().toISOString().split('T')[0]}.json`;
     a.click();
   };
 
-  const handleResetData = () => {
-    if (window.confirm('Reset all club database records back to official GLUK factory defaults?')) {
-      storage.resetAll();
-      window.location.reload();
+  const handleResetFresh = async () => {
+    if (window.confirm('Reinitialize database completely fresh? This will reset database.json so you can start from scratch.')) {
+      await reinitializeDatabase(false);
+      setShowAuthModal(true);
     }
   };
 
-  // Guard: if current tab is executive-only and user is not in executive mode, protect it
+  const liveSession = debates.find((d) => d.status === 'Live Now') || debates[0];
+
   const isExecutiveTab = currentTab === 'executive' || currentTab === 'finances' || currentTab === 'agendas';
   const showAccessDenied = isExecutiveTab && !isExecutiveMode;
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans selection:bg-amber-500/20 selection:text-amber-200">
       
+      {/* Live Push Notification Toast Banner */}
+      {liveToast && (
+        <div className="fixed top-20 right-6 z-50 max-w-sm p-4 rounded-xl bg-slate-900 border border-amber-500/40 text-xs shadow-2xl space-y-1 animate-bounce">
+          <div className="flex items-center gap-2 font-bold text-amber-300">
+            <Bell className="w-4 h-4 text-amber-400" />
+            <span>{liveToast.title}</span>
+          </div>
+          <p className="text-slate-300 leading-relaxed text-[11px]">{liveToast.message}</p>
+        </div>
+      )}
+
       {/* Top Header */}
       <Header
         currentTab={currentTab}
         onSelectTab={setCurrentTab}
         currentUser={currentUser}
         allMembers={allMembers}
-        onSelectUser={switchUserPersona}
         isLiveDebateActive={debates.some((d) => d.status === 'Live Now')}
         isExecutiveMode={isExecutiveMode}
         onToggleExecutiveMode={isExecutiveUser ? handleToggleExecutiveMode : undefined}
-        onOpenNeonModal={() => setShowNeonModal(true)}
+        onOpenAuthModal={() => setShowAuthModal(true)}
       />
 
-      {/* Sub-bar showing contextual portal mode & quick shortcuts */}
+      {/* Sub-bar showing contextual portal mode & database state */}
       <div className="border-b border-slate-900 bg-slate-950/70 px-4 sm:px-6 lg:px-8 py-2">
         <div className="mx-auto max-w-7xl flex flex-wrap items-center justify-between gap-3 text-xs">
           
@@ -278,7 +311,7 @@ function AppContent() {
             {isExecutiveMode ? (
               <span className="inline-flex items-center gap-1.5 text-amber-400 font-semibold">
                 <ShieldCheck className="w-3.5 h-3.5" />
-                <span>Executive Management Mode</span>
+                <span>Executive Operations Center</span>
               </span>
             ) : (
               <span className="inline-flex items-center gap-1.5 text-blue-300 font-semibold">
@@ -316,25 +349,33 @@ function AppContent() {
           </div>
 
           <div className="flex items-center gap-3 text-[11px] text-slate-500">
-            <button
-              onClick={() => setShowNeonModal(true)}
-              className="text-emerald-400 hover:text-emerald-300 font-medium flex items-center gap-1"
-            >
-              <Database className="w-3 h-3" />
-              <span>Neon PostgreSQL</span>
-            </button>
+            <span className="flex items-center gap-1.5 font-mono text-emerald-400">
+              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+              <span>database.json (live sync)</span>
+            </span>
 
             <span>·</span>
 
-            <span>
-              Signed in: <strong className="text-slate-300">{currentUser.fullName}</strong> ({currentUser.executivePosition || currentUser.role})
-            </span>
-            <button
-              onClick={() => setShowMemberPassModal(true)}
-              className="text-amber-400 hover:text-amber-300 font-medium underline underline-offset-2"
-            >
-              My ID Pass
-            </button>
+            {currentUser ? (
+              <>
+                <span>
+                  Signed in: <strong className="text-slate-300">{currentUser.fullName}</strong> ({currentUser.executivePosition || currentUser.role})
+                </span>
+                <button
+                  onClick={() => setShowMemberPassModal(true)}
+                  className="text-amber-400 hover:text-amber-300 font-medium underline underline-offset-2"
+                >
+                  My ID Pass
+                </button>
+              </>
+            ) : (
+              <button
+                onClick={() => setShowAuthModal(true)}
+                className="text-amber-400 hover:text-amber-300 font-bold"
+              >
+                Sign In to Account
+              </button>
+            )}
           </div>
 
         </div>
@@ -365,7 +406,7 @@ function AppContent() {
         ) : (
           <>
             {/* 1. MEMBER DASHBOARD */}
-            {currentTab === 'member-home' && (
+            {currentTab === 'member-home' && currentUser && (
               <MemberDashboard
                 currentUser={currentUser}
                 announcements={announcements}
@@ -378,6 +419,25 @@ function AppContent() {
               />
             )}
 
+            {/* If user is not logged in on home screen */}
+            {currentTab === 'member-home' && !currentUser && (
+              <div className="py-16 text-center max-w-md mx-auto space-y-4">
+                <GlukDebateLogo size={64} className="justify-center" />
+                <h2 className="text-xl font-bold text-white">
+                  Welcome to GLUK Debate Club
+                </h2>
+                <p className="text-xs text-slate-400 leading-relaxed">
+                  Sign in or create a student member account to participate in rounds, track your attendance, and access past debate archives.
+                </p>
+                <button
+                  onClick={() => setShowAuthModal(true)}
+                  className="px-5 py-2.5 bg-amber-400 hover:bg-amber-300 text-slate-950 font-bold rounded-lg text-xs"
+                >
+                  Sign In / Create Account
+                </button>
+              </div>
+            )}
+
             {/* 2. EXECUTIVE DASHBOARD */}
             {currentTab === 'executive' && (
               <ExecutiveDashboard
@@ -387,7 +447,7 @@ function AppContent() {
                 agendas={agendas}
                 announcements={announcements}
                 onNavigate={setCurrentTab}
-                onExportData={handleExportFullHandover}
+                onExportData={handleExportDatabase}
               />
             )}
 
@@ -401,17 +461,17 @@ function AppContent() {
               />
             )}
 
-            {/* 4. EXECUTIVE-ONLY: MEETING AGENDAS & LOGISTICS */}
+            {/* 4. EXECUTIVE-ONLY: MEETING AGENDAS & DELEGATED DUTIES */}
             {currentTab === 'agendas' && (
               <MeetingAgendasLogistics
                 agendas={agendas}
                 members={allMembers}
-                onUpdateAgendas={setAgendas}
+                onUpdateAgendas={handleUpdateAgendas}
               />
             )}
 
             {/* 5. SHARED: LIVE DEBATE & MEET COMPANION */}
-            {currentTab === 'live-debate' && (
+            {currentTab === 'live-debate' && liveSession && (
               <LiveDebateSuite
                 session={liveSession}
                 allMembers={allMembers}
@@ -429,8 +489,8 @@ function AppContent() {
             {currentTab === 'calendar' && (
               <CalendarActivities
                 events={events}
-                currentUser={currentUser}
-                onAddEvent={(ev) => setEvents((prev) => [ev, ...prev])}
+                currentUser={currentUser || allMembers[0]}
+                onAddEvent={handleAddEvent}
               />
             )}
 
@@ -438,7 +498,7 @@ function AppContent() {
             {currentTab === 'members' && (
               <MemberDirectoryPool
                 members={allMembers}
-                currentUser={currentUser}
+                currentUser={currentUser || allMembers[0]}
                 mentorshipNotes={mentorshipNotes}
                 onAddMentorshipNote={(note) => setMentorshipNotes((prev) => [note, ...prev])}
               />
@@ -448,8 +508,8 @@ function AppContent() {
             {currentTab === 'announcements' && (
               <AnnouncementsFeed
                 announcements={announcements}
-                currentUser={currentUser}
-                onAddAnnouncement={(ann) => setAnnouncements((prev) => [ann, ...prev])}
+                currentUser={currentUser || allMembers[0]}
+                onAddAnnouncement={handleAddAnnouncement}
                 onSubmitDuesMpesa={handleSubmitDuesMpesa}
                 onOpenPassModal={() => setShowMemberPassModal(true)}
               />
@@ -476,35 +536,36 @@ function AppContent() {
 
           <div className="flex items-center gap-4 text-slate-400">
             <button
-              onClick={() => setShowNeonModal(true)}
-              className="text-emerald-400 hover:text-emerald-300 transition-colors"
+              onClick={handleExportDatabase}
+              className="hover:text-white transition-colors"
             >
-              Neon PostgreSQL Database
+              Export database.json
             </button>
             <span>·</span>
-            {isExecutiveMode && (
-              <>
-                <button
-                  onClick={handleExportFullHandover}
-                  className="hover:text-white transition-colors"
-                >
-                  Export Executive Handover (.json)
-                </button>
-                <span>·</span>
-              </>
-            )}
             <button
-              onClick={handleResetData}
+              onClick={handleResetFresh}
               className="hover:text-amber-400 transition-colors"
             >
-              Reset Seed Data
+              Start Afresh (Clear Database)
             </button>
           </div>
         </div>
       </footer>
 
+      {/* Auth Modal (Sign Up & Login) */}
+      <AuthModal
+        isOpen={showAuthModal}
+        onClose={() => setShowAuthModal(false)}
+        isFreshDatabase={isFreshDatabase}
+        onSeedTemplates={async () => {
+          await reinitializeDatabase(true);
+          setShowAuthModal(false);
+          fetchAllCollections();
+        }}
+      />
+
       {/* Digital Member Pass Modal */}
-      {showMemberPassModal && (
+      {showMemberPassModal && currentUser && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/85 backdrop-blur-sm">
           <div className="w-full max-w-sm rounded-2xl bg-gradient-to-b from-slate-900 to-slate-950 border border-amber-500/30 p-6 shadow-2xl space-y-5 text-center relative overflow-hidden">
             <div className="absolute -top-12 left-1/2 -translate-x-1/2 w-40 h-40 bg-amber-500/10 rounded-full blur-2xl pointer-events-none" />
@@ -576,12 +637,6 @@ function AppContent() {
           </div>
         </div>
       )}
-
-      {/* Neon PostgreSQL Connection Modal */}
-      <NeonConnectionModal
-        isOpen={showNeonModal}
-        onClose={() => setShowNeonModal(false)}
-      />
 
     </div>
   );

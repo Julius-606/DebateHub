@@ -31,10 +31,20 @@ export interface Member {
   debatesAttendedCount: number;
   totalDebatesCount: number;
   speakerPointsAvg: number;
-  mentorId?: string;
   bio?: string;
   alumniOccupation?: string;
   alumniOrganization?: string;
+}
+
+export interface ClubNotification {
+  id: string;
+  targetUserId: string; // 'all' or specific user ID
+  title: string;
+  message: string;
+  type: 'duty_delegated' | 'announcement' | 'dues_verified' | 'debate_round' | 'general';
+  linkTab?: string;
+  isRead: boolean;
+  createdAt: string;
 }
 
 export interface AgendaItem {
@@ -49,6 +59,7 @@ export interface AgendaItem {
     id: string;
     title: string;
     assignedTo: string;
+    assignedUserId?: string;
     deadline: string;
     isCompleted: boolean;
     notes?: string;
@@ -73,16 +84,15 @@ export interface FinancialTransaction {
   referenceCode: string; // M-Pesa / Bank ref
   recordedBy: string;
   status: 'Verified' | 'Pending Approval';
-  receiptUrl?: string;
 }
 
 export interface SpeakerScore {
   speakerName: string;
   role: string;
-  matterScore: number; // 1-40
-  mannerScore: number; // 1-40
-  methodScore: number; // 1-20
-  totalScore: number;  // 50-100
+  matterScore: number;
+  mannerScore: number;
+  methodScore: number;
+  totalScore: number;
   feedback: string;
 }
 
@@ -100,11 +110,11 @@ export interface DebateSession {
   adjudicators: string[];
   winningTeam?: string;
   teams: {
-    positionName: string; // e.g. "Opening Government (OG)"
+    positionName: string;
     speaker1: string;
     speaker2?: string;
     teamScore?: number;
-    rank?: number; // 1st, 2nd, 3rd, 4th
+    rank?: number;
   }[];
   speakerScores?: SpeakerScore[];
   transcript?: {
