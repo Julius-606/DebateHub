@@ -286,16 +286,35 @@ export const LiveDebateSuite: React.FC<LiveDebateSuiteProps> = ({
 
   const handleFinalizeAndArchive = () => {
     confetti({
-      particleCount: 80,
-      spread: 70,
+      particleCount: 100,
+      spread: 80,
       origin: { y: 0.6 },
     });
+
+    const ogScore = (scores['OG-1']?.matter || 31) + (scores['OG-1']?.manner || 31) + (scores['OG-1']?.method || 15)
+                  + (scores['OG-2']?.matter || 29) + (scores['OG-2']?.manner || 30) + (scores['OG-2']?.method || 14);
+    const ooScore = (scores['OO-1']?.matter || 30) + (scores['OO-1']?.manner || 32) + (scores['OO-1']?.method || 15)
+                  + (scores['OO-2']?.matter || 30) + (scores['OO-2']?.manner || 29) + (scores['OO-2']?.method || 14);
+    const cgScore = (scores['CG-1']?.matter || 32) + (scores['CG-1']?.manner || 30) + (scores['CG-1']?.method || 15)
+                  + (scores['CG-2']?.matter || 30) + (scores['CG-2']?.manner || 30) + (scores['CG-2']?.method || 14);
+    const coScore = (scores['CO-1']?.matter || 31) + (scores['CO-1']?.manner || 31) + (scores['CO-1']?.method || 15)
+                  + (scores['CO-2']?.matter || 31) + (scores['CO-2']?.manner || 30) + (scores['CO-2']?.method || 14);
+
+    const rankedTeams = [
+      { positionName: 'Opening Government (OG)', teamScore: ogScore },
+      { positionName: 'Opening Opposition (OO)', teamScore: ooScore },
+      { positionName: 'Closing Government (CG)', teamScore: cgScore },
+      { positionName: 'Closing Opposition (CO)', teamScore: coScore },
+    ]
+      .sort((a, b) => b.teamScore - a.teamScore)
+      .map((t, idx) => ({ ...t, rank: idx + 1, speaker1: 'Debater 1', speaker2: 'Debater 2' }));
 
     const updated: DebateSession = {
       ...session,
       status: 'Archived',
       transcript: transcriptLines,
-      winningTeam: 'Opening Government (OG)', // Default or calculated based on highest aggregate scores
+      winningTeam: `${rankedTeams[0].positionName} (${rankedTeams[0].teamScore} pts)`,
+      teams: rankedTeams,
     };
 
     onSaveSessionToArchive(updated);

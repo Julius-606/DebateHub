@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   Member,
   DebateSession,
@@ -23,10 +23,10 @@ import { CalendarActivities } from './components/member/CalendarActivities';
 import { AnnouncementsFeed } from './components/member/AnnouncementsFeed';
 import { DrillsPractice } from './components/debate/DrillsPractice';
 import { GlukDebateLogo } from './components/common/GlukDebateLogo';
+import { NeonConnectionModal } from './components/common/NeonConnectionModal';
 import {
   QrCode,
   Download,
-  RotateCcw,
   Zap,
   Bell,
   Lock,
@@ -36,6 +36,7 @@ import {
   LogIn,
   Radio,
   CheckCircle2,
+  Server,
 } from 'lucide-react';
 
 function AppContent() {
@@ -48,13 +49,14 @@ function AppContent() {
     refreshAllData,
   } = useAuth();
 
-  // Core collections synced from server database.json
+  // Core collections synced from server database.json & Neon
   const [agendas, setAgendas] = useState<AgendaItem[]>([]);
   const [transactions, setTransactions] = useState<FinancialTransaction[]>([]);
   const [debates, setDebates] = useState<DebateSession[]>([]);
   const [announcements, setAnnouncements] = useState<Announcement[]>([]);
   const [events, setEvents] = useState<CalendarEvent[]>([]);
   const [mentorshipNotes, setMentorshipNotes] = useState<AlumniMentorshipNote[]>([]);
+  const [isLoadingData, setIsLoadingData] = useState<boolean>(true);
 
   // Navigation
   const isExecutiveUser = currentUser?.role === 'executive';
@@ -64,6 +66,7 @@ function AppContent() {
   // Modals
   const [showAuthModal, setShowAuthModal] = useState(false);
   const [showMemberPassModal, setShowMemberPassModal] = useState(false);
+  const [showNeonModal, setShowNeonModal] = useState(false);
   const [liveToast, setLiveToast] = useState<{ title: string; message: string } | null>(null);
 
   // Sync mode based on logged-in user
@@ -89,15 +92,17 @@ function AppContent() {
     }
   }, [isFreshDatabase, isLoggedIn]);
 
-  // Fetch all live collections from server database.json
-  const fetchAllCollections = async () => {
+  // Fetch all live collections from server
+  const fetchAllCollections = useCallback(async () => {
+    setIsLoadingData(true);
     try {
-      const [agRes, txRes, debRes, annRes, evRes] = await Promise.all([
-        fetch('/api/agendas').then((r) => (r.ok ? r.json() : [])),
-        fetch('/api/transactions').then((r) => (r.ok ? r.json() : [])),
-        fetch('/api/debates').then((r) => (r.ok ? r.json() : [])),
-        fetch('/api/announcements').then((r) => (r.ok ? r.json() : [])),
-        fetch('/api/events').then((r) => (r.ok ? r.json() : [])),
+      const [agRes, txRes, debRes, annRes, evRes, menRes] = await Promise.all([
+        fetch('/api/agendas').then((r) => (r.ok ? r.json() : [])).catch(() => []),
+        fetch('/api/transactions').then((r) => (r.ok ? r.json() : [])).catch(() => []),
+        fetch('/api/debates').then((r) => (r.ok ? r.json() : [])).catch(() => []),
+        fetch('/api/announcements').then((r) => (r.ok ? r.json() : [])).catch(() => []),
+        fetch('/api/events').then((r) => (r.ok ? r.json() : [])).catch(() => []),
+        fetch('/api/mentorship').then((r) => (r.ok ? r.json() : [])).catch(() => []),
       ]);
 
       setAgendas(Array.isArray(agRes) ? agRes : []);
@@ -105,33 +110,38 @@ function AppContent() {
       setDebates(Array.isArray(debRes) ? debRes : []);
       setAnnouncements(Array.isArray(annRes) ? annRes : []);
       setEvents(Array.isArray(evRes) ? evRes : []);
+      setMentorshipNotes(Array.isArray(menRes) ? menRes : []);
     } catch (err) {
       console.warn('Error fetching live data:', err);
+    } finally {
+      setIsLoadingData(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
     fetchAllCollections();
-  }, []);
+  }, [fetchAllCollections]);
 
   // Listen to live Server-Sent Events (SSE) across the entire system!
   useEffect(() => {
     const unsubscribe = liveSync.subscribe((event) => {
-      // Data flowing around the system!
       if (event.type === 'AGENDA_UPDATED') {
-        fetch('/api/agendas').then((r) => r.json()).then(setAgendas);
+        fetch('/api/agendas').then((r) => r.json()).then(setAgendas).catch(() => {});
       }
       if (event.type === 'TRANSACTION_CREATED' || event.type === 'DUES_VERIFIED') {
-        fetch('/api/transactions').then((r) => r.json()).then(setTransactions);
+        fetch('/api/transactions').then((r) => r.json()).then(setTransactions).catch(() => {});
       }
       if (event.type === 'DEBATE_UPDATED') {
-        fetch('/api/debates').then((r) => r.json()).then(setDebates);
+        fetch('/api/debates').then((r) => r.json()).then(setDebates).catch(() => {});
       }
       if (event.type === 'ANNOUNCEMENT_CREATED') {
-        fetch('/api/announcements').then((r) => r.json()).then(setAnnouncements);
+        fetch('/api/announcements').then((r) => r.json()).then(setAnnouncements).catch(() => {});
       }
       if (event.type === 'EVENT_CREATED') {
-        fetch('/api/events').then((r) => r.json()).then(setEvents);
+        fetch('/api/events').then((r) => r.json()).then(setEvents).catch(() => {});
+      }
+      if (event.type === 'MENTORSHIP_UPDATED') {
+        fetch('/api/mentorship').then((r) => r.json()).then(setMentorshipNotes).catch(() => {});
       }
 
       // Show live toast banner when notifications arrive
@@ -147,7 +157,7 @@ function AppContent() {
     });
 
     return () => unsubscribe();
-  }, []);
+  }, [fetchAllCollections]);
 
   const handleToggleExecutiveMode = () => {
     if (!isExecutiveUser) return;
@@ -156,93 +166,144 @@ function AppContent() {
     setCurrentTab(nextMode ? 'executive' : 'member-home');
   };
 
-  // Operations that write to database.json and broadcast live
+  // Operations that write to Express backend & Neon/JSON database
   const handleAddTransaction = async (txn: FinancialTransaction) => {
-    await fetch('/api/transactions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(txn),
-    });
     setTransactions((prev) => [txn, ...prev]);
+    try {
+      await fetch('/api/transactions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(txn),
+      });
+    } catch (err) {
+      console.error('Failed to post transaction:', err);
+    }
   };
 
   const handleVerifyMemberPayment = async (memberId: string, mpesaRef: string) => {
-    await fetch('/api/members/verify-dues', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        memberId,
-        mpesaRef,
-        verifiedBy: currentUser?.fullName || 'Finance Secretary',
-      }),
-    });
-    refreshAllData();
+    try {
+      const res = await fetch('/api/members/verify-dues', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          memberId,
+          mpesaRef,
+          verifiedBy: currentUser?.fullName || 'Finance Secretary',
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data.transaction) {
+          setTransactions((prev) => [data.transaction, ...prev]);
+        }
+      }
+    } catch (err) {
+      console.error('Failed to verify dues:', err);
+    }
+    await refreshAllData();
   };
 
   const handleSubmitDuesMpesa = async (mpesaCode: string) => {
     if (!currentUser) return;
-    await fetch('/api/members/submit-mpesa', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        memberId: currentUser.id,
-        mpesaCode,
-      }),
-    });
-    refreshAllData();
+    try {
+      await fetch('/api/members/submit-mpesa', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          memberId: currentUser.id,
+          mpesaCode,
+        }),
+      });
+    } catch (err) {
+      console.error('Failed to submit M-Pesa code:', err);
+    }
+    await refreshAllData();
   };
 
   const handleUpdateAgendas = async (updatedAgendas: AgendaItem[]) => {
-    const currentAgenda = updatedAgendas[0];
-    if (currentAgenda) {
-      await fetch('/api/agendas', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(currentAgenda),
-      });
-    }
     setAgendas(updatedAgendas);
+    try {
+      for (const ag of updatedAgendas) {
+        await fetch(`/api/agendas/${ag.id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(ag),
+        });
+      }
+    } catch (err) {
+      console.error('Failed to update agenda:', err);
+    }
   };
 
   const handleUpdateLiveSession = async (updatedSession: DebateSession) => {
-    await fetch('/api/debates', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(updatedSession),
-    });
     setDebates((prev) =>
       prev.map((d) => (d.id === updatedSession.id ? updatedSession : d))
     );
+    try {
+      await fetch(`/api/debates/${updatedSession.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updatedSession),
+      });
+    } catch (err) {
+      console.error('Failed to update live session:', err);
+    }
   };
 
   const handleSaveSessionToArchive = async (session: DebateSession) => {
-    await fetch('/api/debates', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(session),
-    });
     setDebates((prev) =>
       prev.map((d) => (d.id === session.id ? session : d))
     );
+    try {
+      await fetch(`/api/debates/${session.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(session),
+      });
+    } catch (err) {
+      console.error('Failed to archive session:', err);
+    }
+    await refreshAllData();
     setCurrentTab('motion-vault');
   };
 
   const handleAddAnnouncement = async (ann: Announcement) => {
-    await fetch('/api/announcements', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(ann),
-    });
     setAnnouncements((prev) => [ann, ...prev]);
+    try {
+      await fetch('/api/announcements', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(ann),
+      });
+    } catch (err) {
+      console.error('Failed to add announcement:', err);
+    }
   };
 
   const handleAddEvent = async (ev: CalendarEvent) => {
-    await fetch('/api/events', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(ev),
-    });
     setEvents((prev) => [ev, ...prev]);
+    try {
+      await fetch('/api/events', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(ev),
+      });
+    } catch (err) {
+      console.error('Failed to add event:', err);
+    }
+  };
+
+  const handleAddMentorshipNote = async (note: AlumniMentorshipNote) => {
+    setMentorshipNotes((prev) => [note, ...prev]);
+    try {
+      await fetch('/api/mentorship', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(note),
+      });
+    } catch (err) {
+      console.error('Failed to save mentorship note:', err);
+    }
   };
 
   const handleExportDatabase = () => {
@@ -253,6 +314,7 @@ function AppContent() {
       debates,
       announcements,
       events,
+      mentorshipNotes,
       exportedAt: new Date().toISOString(),
       institution: 'Great Lakes University of Kisumu Debate Club',
     };
@@ -266,7 +328,7 @@ function AppContent() {
   };
 
   const handleResetFresh = async () => {
-    if (window.confirm('Reinitialize database completely fresh? This will reset database.json so you can start from scratch.')) {
+    if (window.confirm('Reinitialize database completely fresh? This will reset the database so you can start from scratch with brand new accounts.')) {
       await reinitializeDatabase(false);
       setShowAuthModal(true);
     }
@@ -344,15 +406,19 @@ function AppContent() {
               }`}
             >
               <Zap className="w-3.5 h-3.5 text-amber-400" />
-              <span>POI Drills</span>
+              <span>Speaking Drills</span>
             </button>
           </div>
 
           <div className="flex items-center gap-3 text-[11px] text-slate-500">
-            <span className="flex items-center gap-1.5 font-mono text-emerald-400">
+            <button
+              onClick={() => setShowNeonModal(true)}
+              className="flex items-center gap-1.5 font-mono text-emerald-400 hover:underline"
+              title="Click to check database health and schema status"
+            >
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-              <span>database.json (live sync)</span>
-            </span>
+              <span>Live DB & Neon Status</span>
+            </button>
 
             <span>·</span>
 
@@ -405,7 +471,7 @@ function AppContent() {
           </div>
         ) : (
           <>
-            {/* 1. MEMBER DASHBOARD */}
+            {/* 1. MEMBER DASHBOARD (Personal standing only) */}
             {currentTab === 'member-home' && currentUser && (
               <MemberDashboard
                 currentUser={currentUser}
@@ -500,7 +566,7 @@ function AppContent() {
                 members={allMembers}
                 currentUser={currentUser || allMembers[0]}
                 mentorshipNotes={mentorshipNotes}
-                onAddMentorshipNote={(note) => setMentorshipNotes((prev) => [note, ...prev])}
+                onAddMentorshipNote={handleAddMentorshipNote}
               />
             )}
 
@@ -536,10 +602,18 @@ function AppContent() {
 
           <div className="flex items-center gap-4 text-slate-400">
             <button
+              onClick={() => setShowNeonModal(true)}
+              className="hover:text-amber-400 transition-colors flex items-center gap-1"
+            >
+              <Server className="w-3.5 h-3.5" />
+              <span>Database Status</span>
+            </button>
+            <span>·</span>
+            <button
               onClick={handleExportDatabase}
               className="hover:text-white transition-colors"
             >
-              Export database.json
+              Export JSON Database
             </button>
             <span>·</span>
             <button
@@ -562,6 +636,12 @@ function AppContent() {
           setShowAuthModal(false);
           fetchAllCollections();
         }}
+      />
+
+      {/* Database & Neon Status Modal */}
+      <NeonConnectionModal
+        isOpen={showNeonModal}
+        onClose={() => setShowNeonModal(false)}
       />
 
       {/* Digital Member Pass Modal */}

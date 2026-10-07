@@ -1,4 +1,4 @@
-import { neon, neonConfig } from '@neondatabase/serverless';
+import { neon } from '@neondatabase/serverless';
 import dotenv from 'dotenv';
 dotenv.config();
 
@@ -137,9 +137,25 @@ export async function initializeNeonTables(): Promise<{ success: boolean; messag
       );
     `;
 
+    // 7. Mentorship Notes table
+    await sql`
+      CREATE TABLE IF NOT EXISTS mentorship_notes (
+        id VARCHAR(64) PRIMARY KEY,
+        alumni_id VARCHAR(64) NOT NULL,
+        alumni_name VARCHAR(255) NOT NULL,
+        mentee_id VARCHAR(64) NOT NULL,
+        mentee_name VARCHAR(255) NOT NULL,
+        topic VARCHAR(255) NOT NULL,
+        date VARCHAR(32) NOT NULL,
+        advice_summary TEXT NOT NULL,
+        status VARCHAR(32) NOT NULL DEFAULT 'Active',
+        created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+      );
+    `;
+
     return {
       success: true,
-      message: 'Neon PostgreSQL tables initialized successfully (members, transactions, debates, agendas, announcements, events).',
+      message: 'Neon PostgreSQL tables initialized successfully (members, transactions, debates, agendas, announcements, events, mentorship_notes).',
     };
   } catch (error: any) {
     console.error('Error initializing Neon tables:', error);
